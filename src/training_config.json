@@ -26,7 +26,7 @@
   "pytorch_cuda_alloc_conf": "expandable_segments:True",
   "hf_hub_disable_xet": "true",
   "checkpoints_to_keep": 3,
-  "ray_storage_path": "/Volumes/mycatalog/myschema/air_checkpoints/ray_results",
+  "ray_storage_path": "/Volumes/<catalog>/<schema>/<volume>/<checkpoint_directory>",
   "ray_cluster_wait_seconds": 900,
   "ray_cluster_poll_seconds": 10,
   "ray_train_run_name": "tinyllama-fsdp-24node",

@@ -46,8 +46,9 @@ stdout/stderr is captured as **MLflow run artifacts** (tag `mlflow.databricks.ai
 To read them:
 
 ```bash
-# 1. find the experiment (default location since we set no mlflow_experiment_directory):
-#    /Users/<deployer>@databricks.com/air-ray-fsdp-llama
+# 1. find the experiment. The DAB job sets mlflow_experiment_directory to the deploy root,
+#    so it is <workspace_root_path>/air-ray-fsdp-llama (e.g. /Workspace/stage/air-ray-fsdp-llama).
+#    A user/air run with no directory defaults to /Users/<deployer>@databricks.com/air-ray-fsdp-llama.
 # 2. search runs -> get the MLflow run_id for the failed job run
 databricks api post /api/2.0/mlflow/runs/search --json '{"experiment_ids":["<EXPID>"],"max_results":10}' --profile <P>
 # 3. list and read the per-node log artifact (DBFS root reads are disabled; use get-artifact):
@@ -87,11 +88,17 @@ directly and they never appear in `variables.yaml`.
 
 ## Invariants — do NOT regress these (each was a multi-hour bug)
 
-1. **`ai_runtime_task` stays minimal: only `experiment` + `mlflow_run`.** Do **not** add
-   `mlflow_experiment_directory` or `mlflow_artifact_location`. Setting an explicit MLflow
-   artifact location on a `dbfs:/Volumes/...` path makes AI Runtime fail at **task init,
-   before `command.sh`**, with zero logs. Defaults work (and are what makes the MLflow log
-   artifacts above appear).
+1. **`ai_runtime_task`: set `experiment` + `mlflow_run` + `mlflow_experiment_directory`;
+   NEVER set `mlflow_artifact_location`.** Two separate hard-won points:
+   - `mlflow_artifact_location` on a `dbfs:/Volumes/...` path makes AI Runtime fail at **task
+     init, before `command.sh`**, with zero logs. Do not add it.
+   - `mlflow_experiment_directory` **must** point at a folder the **`run_as` SP can write**
+     (we use the deploy root `${var.workspace_root_path}`, which the top-level `permissions`
+     block grants the SP `CAN_MANAGE`). If omitted, the experiment defaults to the *deployer's*
+     `/Users/...` folder; a service-principal `run_as` has no access there, so AI Runtime's
+     MLflow-run creation fails and the task dies with the **same opaque `INTERNAL_ERROR` and no
+     logs** — a different cause from the Volume path (invariant 10), with identical symptoms.
+     (A *user* `run_as` / the `air` CLI doesn't need this — it owns its default experiment.)
 2. **`TRAINING_SCRIPT = train_llama_ray_fsdp.py`** (no `src/` prefix). AI Runtime sets
    `CODE_SOURCE_PATH` to the extracted code-source folder, which is the tgz's single
    top-level dir — i.e. `.../code_source/src`. `command.sh` does `cd "$CODE_SOURCE_PATH"`, so

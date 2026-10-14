@@ -50,13 +50,16 @@ resources:
           max_retries: ${var.task_max_retries}
           timeout_seconds: ${var.task_timeout_seconds}
           ai_runtime_task:
-            # Only experiment + mlflow_run are set, matching the working `air`
-            # path. mlflow_experiment_directory and mlflow_artifact_location are
-            # intentionally omitted: setting an explicit MLflow artifact location
-            # on a dbfs:/Volumes path made AI Runtime fail at task init (before
-            # command.sh), with no surfaced logs. Defaults work.
+            # mlflow_experiment_directory points the experiment at the deploy root,
+            # which the top-level permissions block grants the run_as SP CAN_MANAGE.
+            # The default location is the *deployer's* /Users folder, which a
+            # service-principal run_as cannot write to -> AI Runtime's MLflow run
+            # creation fails and the task dies at init with an opaque INTERNAL_ERROR
+            # and no logs. Do NOT add mlflow_artifact_location on a dbfs:/Volumes path:
+            # that is what crashes AI Runtime at task init (not experiment_directory).
             experiment: ${var.mlflow_experiment_name}
             mlflow_run: ${var.mlflow_run_name}
+            mlflow_experiment_directory: ${var.workspace_root_path}
             code_source_path: ${var.code_artifact_path}
             deployments:
               # AI Runtime requires command_path to be absolute under /Workspace/
@@ -103,7 +106,7 @@ targets:
     mode: production
     default: true
     workspace:
-      host: https://fevm-serverless-stable-14ey07.cloud.databricks.com
+      host: https://<prod_host>.cloud.databricks.com
       root_path: ${var.workspace_root_path}
     run_as:
       service_principal_name: ${var.service_principal_application_id}
@@ -111,7 +114,7 @@ targets:
   stage:
     mode: production
     workspace:
-      host: https://fevm-serverless-stable-14ey07.cloud.databricks.com
+      host: https://<stage_host>.azuredatabricks.net
       root_path: ${var.workspace_root_path}
     run_as:
       service_principal_name: ${var.service_principal_application_id}
@@ -119,7 +122,7 @@ targets:
   test:
     mode: production
     workspace:
-      host: https://fevm-serverless-stable-14ey07.cloud.databricks.com
+      host: https://<test_host>.databricks.com
       root_path: ${var.workspace_root_path}
     run_as:
       service_principal_name: ${var.service_principal_application_id}
