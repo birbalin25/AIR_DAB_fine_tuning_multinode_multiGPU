@@ -99,10 +99,14 @@ targets:
   # Each target sets only its per-environment values: root path, command path, and
   # run_as service principal. schedule_pause_status stays PAUSED for every target via
   # its top-level default; add an override here to unpause a specific environment.
+  #
+  # NOTE: the workspace_root_path values below are examples -- update each to a path
+  # in YOUR workspace for that environment before deploying, and keep command_path
+  # equal to <workspace_root_path>/files/command.sh.
   prod:
     variables:
-      workspace_root_path: /Workspace/test
-      command_path: /Workspace/test/files/command.sh
+      workspace_root_path: /Workspace/prod
+      command_path: /Workspace/prod/files/command.sh
       service_principal_application_id: 862464ba-b0d5-4628-88d5-a854706352e1
   stage:
     variables:
@@ -113,7 +117,7 @@ targets:
       accelerator_count: 3          # 3 nodes x 1 A10 = 3 GPUs
   test:
     variables:
-      workspace_root_path: /Workspace/testair
-      command_path: /Workspace/testair/files/command.sh
+      workspace_root_path: /Workspace/test
+      command_path: /Workspace/test/files/command.sh
       # TODO: replace with the real test service principal application id.
       service_principal_application_id: cec49d78-2830-4ce1-8b6f-1a8ad403029a
