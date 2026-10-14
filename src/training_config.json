@@ -1,6 +1,6 @@
 {
   "model_name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-  "resume_checkpoint": "/Volumes/serverless_stable_14ey07_catalog/amex/air_checkpoints/ray_results/tinyllama-fsdp-24node-new/checkpoint_2026-10-14_01-02-51.396796",
+  "resume_checkpoint": "",
   "random_seed": 42,
   "max_epochs": 3,
   "per_device_batch_size": 2,
@@ -26,9 +26,9 @@
   "pytorch_cuda_alloc_conf": "expandable_segments:True",
   "hf_hub_disable_xet": "true",
   "checkpoints_to_keep": 3,
-  "ray_storage_path": "/Volumes/serverless_stable_14ey07_catalog/amex/air_checkpoints/ray_results",
+  "ray_storage_path": "/Volumes/mycatalog/myschema/air_checkpoints/ray_results",
   "ray_cluster_wait_seconds": 900,
   "ray_cluster_poll_seconds": 10,
-  "ray_train_run_name": "tinyllama-fsdp-24node-new2",
+  "ray_train_run_name": "tinyllama-fsdp-24node",
   "ray_max_failures": 1
 }

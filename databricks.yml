@@ -19,6 +19,20 @@ artifacts:
     files:
       - source: ./dist/code.tgz
 
+# Grant the run_as service principal (per target, via the same variable) access
+# to the deployed job AND the bundle's workspace folder. Files under root_path
+# are owned by the deploying user, so without this the service principal the job
+# runs as cannot read the uploaded entrypoint ("User lacks read access to file:
+# /Workspace/<target>/files/command.sh"). DABs applies these permissions to the
+# root_path folder; its children (files/, artifacts/) inherit them.
+permissions:
+  - level: CAN_MANAGE
+    service_principal_name: ${var.service_principal_application_id}
+  # Keep the deploying identity as an explicit manager so future deploys (by this
+  # user) retain access to the bundle folder and resources.
+  - level: CAN_MANAGE
+    user_name: ${workspace.current_user.userName}
+
 resources:
   jobs:
     llama_finetuning:
@@ -46,11 +60,11 @@ resources:
             code_source_path: ${var.code_artifact_path}
             deployments:
               # AI Runtime requires command_path to be absolute under /Workspace/
-              # or /Volumes/. The CLI resolves ${workspace.file_path} to a
-              # /Shared/... path and strips a /Workspace prefix placed next to the
-              # token, so this is a pure literal of the uploaded files location
-              # (root_path = /Shared/.bundle/air-ray-fsdp-llama-dabs/prod).
-              - command_path: /Workspace/Shared/.bundle/air-ray-fsdp-llama-dabs/prod/files/command.sh
+              # or /Volumes/. It is a per-target literal (var.command_path) that
+              # must equal <root_path>/files/command.sh for that target -- e.g.
+              # /Workspace/prod/files/command.sh when root_path is /Workspace/prod.
+              # See the per-target overrides in variables.yaml.
+              - command_path: ${var.command_path}
                 compute:
                   accelerator_type: ${var.accelerator_type}
                   accelerator_count: ${var.accelerator_count}
@@ -82,9 +96,28 @@ resources:
       # The target-level run_as below applies the service principal to the job.
 
 targets:
+  # Three environments share one workspace (same host); each is isolated by its
+  # own workspace.root_path and its own run_as service principal. The per-target
+  # root_path, command_path, and service principal are set in variables.yaml.
   prod:
     mode: production
     default: true
+    workspace:
+      host: https://fevm-serverless-stable-14ey07.cloud.databricks.com
+      root_path: ${var.workspace_root_path}
+    run_as:
+      service_principal_name: ${var.service_principal_application_id}
+
+  stage:
+    mode: production
+    workspace:
+      host: https://fevm-serverless-stable-14ey07.cloud.databricks.com
+      root_path: ${var.workspace_root_path}
+    run_as:
+      service_principal_name: ${var.service_principal_application_id}
+
+  test:
+    mode: production
     workspace:
       host: https://fevm-serverless-stable-14ey07.cloud.databricks.com
       root_path: ${var.workspace_root_path}

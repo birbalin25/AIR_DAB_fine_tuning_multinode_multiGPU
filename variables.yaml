@@ -10,10 +10,18 @@
 variables:
   job_name:
     default: air-ray-fsdp-llama-training
+  # Per-target (set under each target below -- these differ per environment, so there
+  # is no shared default). The deploy tree (files/, artifacts/, state/) lands under
+  # <root_path>; command_path must equal <root_path>/files/command.sh.
   workspace_root_path:
-    default: /Shared/.bundle/air-ray-fsdp-llama-dabs/prod
+    description: Workspace root path the bundle deploys into, per target.
+  command_path:
+    description: Absolute path to command.sh (<root_path>/files/command.sh), per target.
+  # Per-target run_as service principal (set under each target below). The deploying
+  # identity needs the servicePrincipal.user role on whichever SP it binds at deploy
+  # time, and that SP needs WRITE_VOLUME on the checkpoint Volume.
   service_principal_application_id:
-    default: 862464ba-b0d5-4628-88d5-a854706352e1
+    description: run_as service principal application id, per target.
 
   # Persistent job scheduling.
   schedule_cron_expression:
@@ -71,8 +79,6 @@ variables:
     default: 5
 
   # DAB source and archive paths.
-  command_script_name:
-    default: command.sh
   # Relative to CODE_SOURCE_PATH. AI Runtime sets CODE_SOURCE_PATH to the
   # extracted code-source folder itself -- our tgz's single top-level dir is
   # `src/`, so CODE_SOURCE_PATH ends in /src and the script sits directly in it.
@@ -90,6 +96,23 @@ variables:
   # the dataset (including resume_checkpoint, which lives in training_config.json).
 
 targets:
+  # Each target sets only its per-environment values: root path, command path, and
+  # run_as service principal. schedule_pause_status stays PAUSED for every target via
+  # its top-level default; add an override here to unpause a specific environment.
   prod:
     variables:
-      schedule_pause_status: PAUSED
+      workspace_root_path: /Workspace/prod
+      command_path: /Workspace/prod/files/command.sh
+      service_principal_application_id: 862464ba-b0d5-4628-88d5-a854706352e1
+  stage:
+    variables:
+      workspace_root_path: /Workspace/stage
+      command_path: /Workspace/stage/files/command.sh
+      # TODO: replace with the real stage service principal application id.
+      service_principal_application_id: REPLACE_WITH_STAGE_SP_APPLICATION_ID
+  test:
+    variables:
+      workspace_root_path: /Workspace/test
+      command_path: /Workspace/test/files/command.sh
+      # TODO: replace with the real test service principal application id.
+      service_principal_application_id: REPLACE_WITH_TEST_SP_APPLICATION_ID

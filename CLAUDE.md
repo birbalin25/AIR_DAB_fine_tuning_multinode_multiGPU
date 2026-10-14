@@ -20,8 +20,11 @@ databricks auth describe --profile <PROFILE>
 ```
 
 Bundle lifecycle (**requires Databricks CLI ≥ 1.20.0** — older CLIs don't know the
-`ai_runtime_task` / `environment_variables` fields and silently drop them; `prod` is the
-only/default target):
+`ai_runtime_task` / `environment_variables` fields and silently drop them). There are three
+targets — `prod` (default), `stage`, `test` — on the **same workspace host**, isolated by
+`workspace.root_path` (`/Workspace/prod`, `/Workspace/stage`, `/Workspace/test`) and a
+distinct `run_as` service principal each (see `variables.yaml` `targets:`). Swap `--target`
+below for `stage`/`test`:
 
 ```bash
 databricks bundle validate --target prod --profile <PROFILE>
@@ -98,7 +101,7 @@ directly and they never appear in `variables.yaml`.
    `MisconfigurationException: gradient_clip_algorithm='norm' is currently not supported for
    FSDPPrecision`. Do not reintroduce reliance on `Trainer(gradient_clip_val=...)` default clipping.
 4. **The `run_as` service principal needs `WRITE_VOLUME`** (not just `READ_VOLUME`) on the
-   checkpoint Volume (`serverless_stable_14ey07_catalog.amex.air_checkpoints`), or the driver
+   checkpoint Volume (the `ray_storage_path` Volume configured in `training_config.json`), or the driver
    can't write checkpoints. Also, the deploying identity needs the `servicePrincipal.user`
    role on the SP to bind `run_as` at deploy time.
 5. **`bundle.name` and `workspace.host` are pinned literals** in `databricks.yml` — DABs
@@ -125,6 +128,16 @@ directly and they never appear in `variables.yaml`.
    trains only the remaining epochs up to `max_epochs`; point `resume_checkpoint` at the
    checkpoint **directory** (contains `checkpoint.ckpt`) and use a fresh `ray_train_run_name`
    so the explicit checkpoint isn't overridden by auto-resume of a newer one in the same folder.
+10. **A top-level `permissions` block must grant the `run_as` SP access to the deploy folder.**
+    Files under `root_path` are owned by the *deploying user*, so when the job runs **as the
+    service principal** it cannot read `command.sh` unless the SP has access to the bundle
+    folder. Symptom: the task fails with `User lacks read access to file:
+    <root_path>/files/command.sh` (run shows `Blocked` then `INTERNAL_ERROR`). The bundle sets
+    a top-level `permissions:` entry granting the SP (`${var.service_principal_application_id}`)
+    `CAN_MANAGE`; DABs applies it to the `root_path` folder and `files/`/`artifacts/` inherit it.
+    A second entry grants the deployer (`${workspace.current_user.userName}`) `CAN_MANAGE` so
+    future deploys keep access. This was only unnecessary under the old world-readable
+    `/Shared/.bundle/...` root; do **not** drop the block now that `root_path` is `/Workspace/...`.
 
 ## Runtime flow (`bundle run`)
 
@@ -161,7 +174,22 @@ directly and they never appear in `variables.yaml`.
 - `artifacts.code` packages `src/` (script + both JSON files) into `./dist/code.tgz`; the
   `files:` entry naming that output is **required** for a `tgz` artifact. Keep `src/` free of
   stray files (e.g. `__pycache__`) — they ship too.
+- Three targets (`prod`/`stage`/`test`) are defined in `databricks.yml` `targets:` with the
+  per-target `workspace_root_path`, `command_path`, and `service_principal_application_id`
+  set per target in `variables.yaml` `targets:` (no shared default). **`command_path` must track
+  `root_path`**: it is
+  `<root_path>/files/command.sh` (e.g. `/Workspace/stage/files/command.sh` for `/Workspace/stage`).
+  If you change a target's `root_path`, change its `command_path` too, or AI Runtime can't find
+  `command.sh`. `stage`/`test` ship with **placeholder SP ids** (`REPLACE_WITH_*`) — set the real
+  ones before deploying those targets.
 - Before first deploy to a new workspace, set: `workspace.host` (literal in `databricks.yml`),
-  `service_principal_application_id` / `workspace_root_path` (in `variables.yaml`), and the
-  Volume paths in `src/training_config.json` (`ray_storage_path`). Grant the SP `WRITE_VOLUME`
-  on the checkpoint Volume.
+  per-target `service_principal_application_id` / `workspace_root_path` / `command_path` (in
+  `variables.yaml`), and the Volume paths in `src/training_config.json` (`ray_storage_path`).
+  Grant each target's SP `WRITE_VOLUME` on the checkpoint Volume, and the deploying identity the
+  `servicePrincipal.user` role on that SP.
+- The top-level `permissions:` block grants the `run_as` SP (and the deployer) `CAN_MANAGE` so
+  the SP can read the deployed code folder — required for any non-shared `root_path` (see
+  invariant 10). Keep its SP reference in sync with the per-target `service_principal_application_id`.
+- `README.md` is the public overview + quickstart, kept in sync with this design; this `CLAUDE.md`
+  is the authoritative engineering reference (architecture + invariants). A customer-facing
+  deployment runbook is maintained separately (Google Doc).
