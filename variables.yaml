@@ -1,0 +1,95 @@
+# Deployment and infrastructure configuration for the bundle.
+# Training hyperparameters live in src/training_config.json and the dataset in
+# src/training_examples.json (see the note at the bottom of this file for why).
+# Do not store DATABRICKS_CLIENT_SECRET here.
+#
+# NOTE: the bundle name and workspace host are pinned as literals in
+# databricks.yml -- DABs does not allow variable interpolation for the auth
+# host, and parameterizing the bundle name breaks state / `destroy`. Edit them
+# (and the command_path literal) in databricks.yml if you move workspaces.
+variables:
+  job_name:
+    default: air-ray-fsdp-llama-training
+  workspace_root_path:
+    default: /Shared/.bundle/air-ray-fsdp-llama-dabs/prod
+  service_principal_application_id:
+    default: 862464ba-b0d5-4628-88d5-a854706352e1
+
+  # Persistent job scheduling.
+  schedule_cron_expression:
+    default: 0 0 9 * * ?
+  schedule_timezone_id:
+    default: UTC
+  schedule_pause_status:
+    default: PAUSED
+  max_concurrent_runs:
+    default: 1
+  task_max_retries:
+    default: 1
+  task_timeout_seconds:
+    default: 7200
+
+  # MLflow configuration.
+  mlflow_experiment_name:
+    default: air-ray-fsdp-llama
+  mlflow_run_name:
+    default: tinyllama-fsdp-multinode
+
+  # AI Runtime compute: GPU_8xH100 with 24 total GPUs provisions 3 nodes.
+  accelerator_type:
+    default: GPU_8xH100
+  accelerator_count:
+    default: 24
+  base_environment:
+    default: workspace-base-environments/databricks_ai_v6
+  environment_key:
+    default: training
+  environment_variables_key:
+    default: training
+
+  # Packages used by the attached TinyLlama + Lightning notebook code.
+  dependency_lightning:
+    default: lightning>=2.4,<2.6
+  dependency_transformers:
+    default: transformers>=4.45,<5
+  dependency_accelerate:
+    default: accelerate>=0.34
+  dependency_safetensors:
+    default: safetensors>=0.4
+  dependency_ray:
+    default: ray[train]>=2.40
+
+  # Ray bootstrap settings consumed by command.sh. These stay as individual
+  # environment variables because the shell script reads them directly; the
+  # remaining Ray settings used only by the Python driver live in
+  # src/training_config.json.
+  ray_head_port:
+    default: 6379
+  ray_join_retries:
+    default: 30
+  ray_join_sleep_seconds:
+    default: 5
+
+  # DAB source and archive paths.
+  command_script_name:
+    default: command.sh
+  # Relative to CODE_SOURCE_PATH. AI Runtime sets CODE_SOURCE_PATH to the
+  # extracted code-source folder itself -- our tgz's single top-level dir is
+  # `src/`, so CODE_SOURCE_PATH ends in /src and the script sits directly in it.
+  # No `src/` prefix here (that produced `src/src/...` file-not-found).
+  training_script_name:
+    default: train_llama_ray_fsdp.py
+  code_artifact_path:
+    default: ./dist/code.tgz
+
+  # Training configuration and the inline dataset are NOT passed as environment
+  # variables: the AI Runtime job caps each env var value at 512 characters, and
+  # both blobs exceed that. They are instead shipped inside the code artifact as
+  # src/training_config.json and src/training_examples.json, which the driver
+  # reads from disk next to itself. Edit those files to retune training or change
+  # the dataset (including resume_checkpoint, which lives in training_config.json).
+
+targets:
+  prod:
+    variables:
+      schedule_pause_status: PAUSED

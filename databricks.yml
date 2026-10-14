@@ -1,0 +1,92 @@
+# bundle.name and workspace.host below are pinned to literals: Databricks Asset
+# Bundles do not support variable interpolation for the auth host, and
+# parameterizing the bundle name risks duplicate deployments / broken destroy.
+bundle:
+  name: air-ray-fsdp-llama-dabs
+  databricks_cli_version: ">= 1.20.0"
+
+include:
+  - variables.yaml
+
+artifacts:
+  code:
+    type: tgz
+    path: .
+    include:
+      - src
+    # Required: a tgz artifact must name its output path (validation fails
+    # without this). ai_runtime_task.code_source_path references the same path.
+    files:
+      - source: ./dist/code.tgz
+
+resources:
+  jobs:
+    llama_finetuning:
+      name: ${var.job_name}
+      max_concurrent_runs: ${var.max_concurrent_runs}
+      schedule:
+        quartz_cron_expression: "${var.schedule_cron_expression}"
+        timezone_id: ${var.schedule_timezone_id}
+        pause_status: ${var.schedule_pause_status}
+
+      tasks:
+        - task_key: train_llama
+          environment_key: ${var.environment_key}
+          environment_variables_key: ${var.environment_variables_key}
+          max_retries: ${var.task_max_retries}
+          timeout_seconds: ${var.task_timeout_seconds}
+          ai_runtime_task:
+            # Only experiment + mlflow_run are set, matching the working `air`
+            # path. mlflow_experiment_directory and mlflow_artifact_location are
+            # intentionally omitted: setting an explicit MLflow artifact location
+            # on a dbfs:/Volumes path made AI Runtime fail at task init (before
+            # command.sh), with no surfaced logs. Defaults work.
+            experiment: ${var.mlflow_experiment_name}
+            mlflow_run: ${var.mlflow_run_name}
+            code_source_path: ${var.code_artifact_path}
+            deployments:
+              # AI Runtime requires command_path to be absolute under /Workspace/
+              # or /Volumes/. The CLI resolves ${workspace.file_path} to a
+              # /Shared/... path and strips a /Workspace prefix placed next to the
+              # token, so this is a pure literal of the uploaded files location
+              # (root_path = /Shared/.bundle/air-ray-fsdp-llama-dabs/prod).
+              - command_path: /Workspace/Shared/.bundle/air-ray-fsdp-llama-dabs/prod/files/command.sh
+                compute:
+                  accelerator_type: ${var.accelerator_type}
+                  accelerator_count: ${var.accelerator_count}
+
+      environments:
+        - environment_key: ${var.environment_key}
+          spec:
+            base_environment: ${var.base_environment}
+            dependencies:
+              - "${var.dependency_lightning}"
+              - "${var.dependency_transformers}"
+              - "${var.dependency_accelerate}"
+              - "${var.dependency_safetensors}"
+              - "${var.dependency_ray}"
+
+      # The AI Runtime job caps environment_variables at 20 entries and each
+      # value at 512 characters. Only the small values command.sh reads directly
+      # are passed here; training config and the dataset ship inside the code
+      # artifact as src/training_config.json and src/training_examples.json.
+      environment_variables:
+        - environment_variables_key: ${var.environment_variables_key}
+          spec:
+            variables:
+              TRAINING_SCRIPT: "${var.training_script_name}"
+              RAY_HEAD_PORT: "${var.ray_head_port}"
+              RAY_JOIN_RETRIES: "${var.ray_join_retries}"
+              RAY_JOIN_SLEEP_SECONDS: "${var.ray_join_sleep_seconds}"
+
+      # The target-level run_as below applies the service principal to the job.
+
+targets:
+  prod:
+    mode: production
+    default: true
+    workspace:
+      host: https://fevm-serverless-stable-14ey07.cloud.databricks.com
+      root_path: ${var.workspace_root_path}
+    run_as:
+      service_principal_name: ${var.service_principal_application_id}

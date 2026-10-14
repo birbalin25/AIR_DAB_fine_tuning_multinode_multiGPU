@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Databricks bundle state and build artifacts
+.databricks/
+dist/
+
+# Python
+__pycache__/
+*.pyc
