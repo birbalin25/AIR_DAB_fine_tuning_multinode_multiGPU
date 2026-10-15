@@ -106,7 +106,7 @@ targets:
     mode: production
     default: true
     workspace:
-      host: https://<prod_host>.cloud.databricks.com
+      host: https://<prod_host>.databricks.com
       root_path: ${var.workspace_root_path}
     run_as:
       service_principal_name: ${var.service_principal_application_id}

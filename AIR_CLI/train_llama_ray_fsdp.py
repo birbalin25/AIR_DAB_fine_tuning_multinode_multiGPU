@@ -8,6 +8,7 @@ GPU, and RayFSDPStrategy provides the distributed FSDP integration.
 
 import json
 import os
+import random
 import time
 from functools import partial
 from pathlib import Path
@@ -136,7 +137,29 @@ RAY_CLUSTER_POLL_SECONDS = int(cfg("ray_cluster_poll_seconds"))
 RAY_TRAIN_RUN_NAME = str(cfg("ray_train_run_name"))
 RAY_MAX_FAILURES = int(cfg("ray_max_failures"))
 CHECKPOINTS_TO_KEEP = int(cfg("checkpoints_to_keep"))
+VALIDATION_SPLIT = float(cfg("validation_split"))
+VAL_PER_DEVICE_BATCH_SIZE = int(cfg("val_per_device_batch_size"))
+NUM_SANITY_VAL_STEPS = int(cfg("num_sanity_val_steps"))
 TRAINING_EXAMPLES = parse_examples()
+
+
+def split_train_val(examples):
+    """Deterministically hold out a validation slice (seeded by random_seed).
+
+    Returns (train_examples, val_examples). With validation_split <= 0 the whole
+    dataset is used for training and validation is disabled. When a split is
+    requested, at least one example is kept for each of training and validation.
+    """
+    if VALIDATION_SPLIT <= 0:
+        return list(examples), []
+    shuffled = list(examples)
+    random.Random(RANDOM_SEED).shuffle(shuffled)
+    n_val = int(round(len(shuffled) * VALIDATION_SPLIT))
+    n_val = max(1, min(n_val, len(shuffled) - 1))
+    return shuffled[n_val:], shuffled[:n_val]
+
+
+TRAIN_EXAMPLES, VAL_EXAMPLES = split_train_val(TRAINING_EXAMPLES)
 
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", str(cfg("tokenizers_parallelism")))
@@ -229,6 +252,23 @@ class TinyLlamaLightningModule(pl.LightningModule):
         )
         return outputs.loss
 
+    def validation_step(self, batch, batch_idx):
+        outputs = self(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+        )
+        self.log(
+            "val_loss",
+            outputs.loss,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+            batch_size=batch["input_ids"].shape[0],
+        )
+        return outputs.loss
+
     def configure_optimizers(self):
         return torch.optim.AdamW(
             self.parameters(),
@@ -252,15 +292,44 @@ class TinyLlamaLightningModule(pl.LightningModule):
 
 
 class ProgressCallback(pl.Callback):
-    def on_train_epoch_end(self, trainer, pl_module):
-        if trainer.is_global_zero:
-            loss = trainer.callback_metrics.get("train_loss")
-            loss_value = float(loss.detach().cpu()) if loss is not None else float("nan")
+    @staticmethod
+    def _metric(trainer, *names):
+        # train_loss is logged with on_step=True AND on_epoch=True, so Lightning
+        # stores it under the suffixed keys train_loss_step / train_loss_epoch
+        # (not the bare "train_loss"); val_loss is epoch-only and keeps its name.
+        # Try the given keys in order and return the first present as a float.
+        for name in names:
+            value = trainer.callback_metrics.get(name)
+            if value is not None:
+                return float(value.detach().cpu())
+        return None
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if not trainer.is_global_zero:
+            return
+        step_loss = self._metric(trainer, "train_loss_step", "train_loss")
+        if step_loss is not None:
             print(
-                f"epoch={trainer.current_epoch + 1}/{trainer.max_epochs} "
-                f"global_step={trainer.global_step} train_loss={loss_value:.4f}",
+                f"step={trainer.global_step} train_loss={step_loss:.4f}",
                 flush=True,
             )
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        # Lightning runs the validation loop before on_train_epoch_end, so both
+        # the epoch train loss and val loss are in callback_metrics here.
+        if not trainer.is_global_zero:
+            return
+        parts = [
+            f"epoch={trainer.current_epoch + 1}/{trainer.max_epochs}",
+            f"global_step={trainer.global_step}",
+        ]
+        train_loss = self._metric(trainer, "train_loss_epoch", "train_loss")
+        if train_loss is not None:
+            parts.append(f"train_loss={train_loss:.4f}")
+        val_loss = self._metric(trainer, "val_loss")
+        if val_loss is not None:
+            parts.append(f"val_loss={val_loss:.4f}")
+        print(" ".join(parts), flush=True)
 
 
 def train_func(config: dict):
@@ -273,7 +342,7 @@ def train_func(config: dict):
         tokenizer.pad_token = tokenizer.eos_token
 
     train_dataset = InlineInstructionDataset(
-        examples=TRAINING_EXAMPLES,
+        examples=TRAIN_EXAMPLES,
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
     )
@@ -286,6 +355,26 @@ def train_func(config: dict):
         pin_memory=True,
         persistent_workers=DATALOADER_NUM_WORKERS > 0,
     )
+
+    # Held-out validation loader (None disables validation). shuffle=False so the
+    # val loss is comparable across epochs; use_distributed_sampler shards it the
+    # same way as training.
+    val_loader = None
+    if VAL_EXAMPLES:
+        val_dataset = InlineInstructionDataset(
+            examples=VAL_EXAMPLES,
+            tokenizer=tokenizer,
+            max_length=MAX_LENGTH,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=VAL_PER_DEVICE_BATCH_SIZE,
+            shuffle=False,
+            drop_last=False,
+            num_workers=DATALOADER_NUM_WORKERS,
+            pin_memory=True,
+            persistent_workers=DATALOADER_NUM_WORKERS > 0,
+        )
 
     auto_wrap_policy = partial(
         transformer_auto_wrap_policy,
@@ -318,6 +407,7 @@ def train_func(config: dict):
         max_epochs=MAX_EPOCHS,
         gradient_clip_val=GRADIENT_CLIP_VAL,
         log_every_n_steps=LOG_EVERY_N_STEPS,
+        num_sanity_val_steps=NUM_SANITY_VAL_STEPS,
         plugins=[RayLightningEnvironment()],
         callbacks=[
             RayTrainReportCallback(),
@@ -346,6 +436,7 @@ def train_func(config: dict):
             lightning_trainer.fit(
                 model=model,
                 train_dataloaders=train_loader,
+                val_dataloaders=val_loader,
                 ckpt_path=checkpoint_path,
             )
     elif RESUME_CHECKPOINT:
@@ -361,12 +452,14 @@ def train_func(config: dict):
         lightning_trainer.fit(
             model=model,
             train_dataloaders=train_loader,
+            val_dataloaders=val_loader,
             ckpt_path=checkpoint_path,
         )
     else:
         lightning_trainer.fit(
             model=model,
             train_dataloaders=train_loader,
+            val_dataloaders=val_loader,
         )
 
 

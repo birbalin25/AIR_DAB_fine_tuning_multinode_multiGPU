@@ -18,8 +18,10 @@ mlflow_run_name: tinyllama-fsdp-multinode
 
 # Compute: GPU_8xH100 with 24 GPUs -> 3 nodes (same as the DAB default accelerator_count).
 compute:
-  accelerator_type: GPU_8xH100
-  num_accelerators: 24
+  # accelerator_type: GPU_8xH100
+  # num_accelerators: 24
+  accelerator_type: GPU_1xA10
+  num_accelerators: 4
 
 # Python environment. version 6 == the DAB base_environment
 # "workspace-base-environments/databricks_ai_v6"; dependencies are identical.
