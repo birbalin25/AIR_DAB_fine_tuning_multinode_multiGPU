@@ -34,6 +34,14 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
+try:
+    import mlflow
+    from mlflow.tracking import MlflowClient
+
+    _MLFLOW_AVAILABLE = True
+except Exception:  # mlflow ships in the AI Runtime base env; never hard-fail if absent
+    _MLFLOW_AVAILABLE = False
+
 
 def required_env(name: str) -> str:
     value = os.environ.get(name)
@@ -137,6 +145,13 @@ RAY_TRAIN_RUN_NAME = str(cfg("ray_train_run_name"))
 RAY_MAX_FAILURES = int(cfg("ray_max_failures"))
 CHECKPOINTS_TO_KEEP = int(cfg("checkpoints_to_keep"))
 TRAINING_EXAMPLES = parse_examples()
+# Optional (read with a default so it never triggers the missing-key check): set
+# "mlflow_log_metrics": false in training_config.json to disable metric logging.
+MLFLOW_LOG_METRICS = (
+    _MLFLOW_AVAILABLE
+    and str(CONFIG.get("mlflow_log_metrics", True)).strip().lower()
+    in {"1", "true", "yes", "y", "on"}
+)
 
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", str(cfg("tokenizers_parallelism")))
@@ -263,6 +278,85 @@ class ProgressCallback(pl.Callback):
             )
 
 
+class MLflowMetricsCallback(pl.Callback):
+    """Log training metrics into the AI Runtime MLflow run from global rank 0.
+
+    Every MLflow call is best-effort: a logging/auth failure must never crash
+    training (it warns once, then stays quiet), so this remains safe even if a
+    remote worker cannot reach the tracking server.
+    """
+
+    def __init__(self, client, run_id, log_every_n_steps, world_size):
+        self.client = client
+        self.run_id = run_id
+        self.log_every_n_steps = max(1, int(log_every_n_steps))
+        self.world_size = max(1, int(world_size))
+        self._epoch_start = None
+        self._epoch_samples = 0
+        self._warned = False
+
+    def _log(self, key, value, step):
+        if value is None:
+            return
+        try:
+            self.client.log_metric(self.run_id, key, float(value), step=int(step))
+        except Exception as error:  # best-effort; never break training
+            if not self._warned:
+                print(f"MLflow metric logging failed ({key}): {error}", flush=True)
+                self._warned = True
+
+    @staticmethod
+    def _metric(trainer, *names):
+        # train_loss is logged on_step AND on_epoch, so Lightning stores the
+        # suffixed keys train_loss_step / train_loss_epoch (not bare "train_loss").
+        for name in names:
+            value = trainer.callback_metrics.get(name)
+            if value is not None:
+                return float(value.detach().cpu())
+        return None
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self._epoch_start = time.time()
+        self._epoch_samples = 0
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self._epoch_samples += int(batch["input_ids"].shape[0])
+        if not trainer.is_global_zero:
+            return
+        step = trainer.global_step
+        if step % self.log_every_n_steps != 0:
+            return
+        self._log("train_loss_step", self._metric(trainer, "train_loss_step", "train_loss"), step)
+        if trainer.optimizers:
+            self._log("learning_rate", trainer.optimizers[0].param_groups[0].get("lr"), step)
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if not trainer.is_global_zero:
+            return
+        step = trainer.global_step
+        self._log("epoch", trainer.current_epoch + 1, step)
+        self._log("global_step", step, step)
+        self._log("train_loss_epoch", self._metric(trainer, "train_loss_epoch", "train_loss"), step)
+        if self._epoch_start is not None:
+            duration = time.time() - self._epoch_start
+            self._log("epoch_duration_seconds", duration, step)
+            if duration > 0:
+                # Scale rank-0's shard count by world_size for a cluster-wide rate.
+                self._log(
+                    "samples_per_second",
+                    (self._epoch_samples * self.world_size) / duration,
+                    step,
+                )
+        if torch.cuda.is_available():
+            self._log(
+                "peak_gpu_memory_mb",
+                torch.cuda.max_memory_allocated() / (1024 * 1024),
+                step,
+            )
+
+
 def train_func(config: dict):
     """Runs once per Ray worker, using one GPU per worker."""
     rank = train.get_context().get_world_rank()
@@ -309,6 +403,32 @@ def train_func(config: dict):
         ),
     )
 
+    # RayTrainReportCallback + ProgressCallback are unchanged; the MLflow callback
+    # (rank-0 only, best-effort) is appended when enabled and a run id was passed.
+    callbacks = [RayTrainReportCallback(), ProgressCallback()]
+    mlflow_run_id = config.get("mlflow_run_id")
+    mlflow_tracking_uri = config.get("mlflow_tracking_uri")
+    if MLFLOW_LOG_METRICS and mlflow_run_id:
+        try:
+            if mlflow_tracking_uri:
+                mlflow.set_tracking_uri(mlflow_tracking_uri)
+            mlflow_client = (
+                MlflowClient(tracking_uri=mlflow_tracking_uri)
+                if mlflow_tracking_uri
+                else MlflowClient()
+            )
+            callbacks.append(
+                MLflowMetricsCallback(
+                    client=mlflow_client,
+                    run_id=mlflow_run_id,
+                    log_every_n_steps=LOG_EVERY_N_STEPS,
+                    world_size=train.get_context().get_world_size(),
+                )
+            )
+        except Exception as error:  # never let metric setup break training
+            if rank == 0:
+                print(f"MLflow metrics callback not attached: {error}", flush=True)
+
     lightning_trainer = pl.Trainer(
         accelerator="gpu",
         devices=1,
@@ -319,10 +439,7 @@ def train_func(config: dict):
         gradient_clip_val=GRADIENT_CLIP_VAL,
         log_every_n_steps=LOG_EVERY_N_STEPS,
         plugins=[RayLightningEnvironment()],
-        callbacks=[
-            RayTrainReportCallback(),
-            ProgressCallback(),
-        ],
+        callbacks=callbacks,
         logger=False,
         enable_progress_bar=False,
         enable_model_summary=False,
@@ -401,8 +518,33 @@ def main():
     total_gpus = wait_for_all_gpus(ray)
     print(f"All Ray nodes joined; using {total_gpus} Ray workers", flush=True)
 
+    # Resolve the AI Runtime MLflow run so workers log into it (not a new/nested run).
+    mlflow_run_id = None
+    mlflow_tracking_uri = None
+    if MLFLOW_LOG_METRICS:
+        try:
+            mlflow_tracking_uri = mlflow.get_tracking_uri()
+            active_run = mlflow.active_run()
+            mlflow_run_id = (
+                active_run.info.run_id if active_run else os.environ.get("MLFLOW_RUN_ID")
+            )
+        except Exception as error:
+            print(f"Could not resolve MLflow run for metrics: {error}", flush=True)
+    if mlflow_run_id:
+        print(
+            f"Logging metrics to MLflow run {mlflow_run_id} "
+            f"(tracking_uri={mlflow_tracking_uri})",
+            flush=True,
+        )
+    else:
+        print("No MLflow run resolved; metric logging disabled for this run.", flush=True)
+
     trainer = TorchTrainer(
         train_loop_per_worker=train_func,
+        train_loop_config={
+            "mlflow_run_id": mlflow_run_id,
+            "mlflow_tracking_uri": mlflow_tracking_uri,
+        },
         scaling_config=ScalingConfig(
             num_workers=total_gpus,
             use_gpu=True,
@@ -419,8 +561,42 @@ def main():
         ),
     )
 
+    train_start = time.time()
     result = trainer.fit()
-    print(f"Training finished: {result.metrics}", flush=True)
+    total_training_seconds = time.time() - train_start
+    print(
+        f"Training finished in {total_training_seconds:.1f}s: {result.metrics}",
+        flush=True,
+    )
+
+    # Driver-side logging (the driver has the AI Runtime MLflow context + workspace
+    # auth): run-level params and the total wall-clock time.
+    if mlflow_run_id:
+        try:
+            driver_client = (
+                MlflowClient(tracking_uri=mlflow_tracking_uri)
+                if mlflow_tracking_uri
+                else MlflowClient()
+            )
+            driver_client.log_metric(
+                mlflow_run_id, "total_training_seconds", float(total_training_seconds)
+            )
+            run_params = {
+                "model_name": MODEL_NAME,
+                "max_epochs": MAX_EPOCHS,
+                "learning_rate": LEARNING_RATE,
+                "per_device_batch_size": PER_DEVICE_BATCH_SIZE,
+                "world_size": total_gpus,
+                "fsdp_sharding_strategy": FSDP_SHARDING_STRATEGY,
+            }
+            for key, value in run_params.items():
+                try:
+                    driver_client.log_param(mlflow_run_id, key, value)
+                except Exception:
+                    pass  # params are immutable; ignore if AI Runtime already set one
+        except Exception as error:
+            print(f"Driver-side MLflow logging failed: {error}", flush=True)
+
     for index, (checkpoint, metrics) in enumerate(result.best_checkpoints):
         print(
             f"retained_checkpoint[{index}]={checkpoint} metrics={metrics}",

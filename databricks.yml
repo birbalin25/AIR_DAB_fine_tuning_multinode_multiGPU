@@ -106,7 +106,7 @@ targets:
     mode: production
     default: true
     workspace:
-      host: https://<prod_host>.databricks.com
+      host: https://fevm-serverless-stable-14ey07.cloud.databricks.com
       root_path: ${var.workspace_root_path}
     run_as:
       service_principal_name: ${var.service_principal_application_id}

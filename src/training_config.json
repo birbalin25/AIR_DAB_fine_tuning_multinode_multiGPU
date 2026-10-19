@@ -9,6 +9,7 @@
   "max_length": 256,
   "dataloader_num_workers": 2,
   "log_every_n_steps": 1,
+  "mlflow_log_metrics": true,
   "gradient_clip_val": 1.0,
   "lightning_precision": "32-true",
   "model_torch_dtype": "bfloat16",
@@ -26,9 +27,9 @@
   "pytorch_cuda_alloc_conf": "expandable_segments:True",
   "hf_hub_disable_xet": "true",
   "checkpoints_to_keep": 3,
-  "ray_storage_path": "/Volumes/<catalog>/<schema>/<volume>/<checkpoint_directory>",
+  "ray_storage_path": "/Volumes/serverless_stable_14ey07_catalog/air/air_checkpoints/checkpoint_directory",
   "ray_cluster_wait_seconds": 900,
   "ray_cluster_poll_seconds": 10,
-  "ray_train_run_name": "tinyllama-fsdp-24node",
+  "ray_train_run_name": "tinyllama-fsdp-240samples-1",
   "ray_max_failures": 1
 }
