@@ -31,7 +31,9 @@ databricks bundle validate --target prod --profile <PROFILE>
 databricks bundle deploy  --target prod --profile <PROFILE>
 databricks bundle run llama_finetuning --target prod --profile <PROFILE>   # resource key, not display name
 databricks bundle destroy --target prod --profile <PROFILE>
-# scale without editing files: --var="accelerator_count=16"   (multiple of 8; 8/node)
+# scale without editing files: --var="accelerator_count=16"
+#   GPUs-per-node depends on accelerator_type: GPU_8xH100 = 8/node (use a multiple of 8),
+#   GPU_1xA10 = 1/node (any count). stage overrides to GPU_1xA10 x3 in variables.yaml.
 ```
 
 No local tests/lint. `train_llama_ray_fsdp.py` cannot run outside AI Runtime (needs Ray +
@@ -56,10 +58,45 @@ databricks api get "/api/2.0/mlflow/artifacts/list?run_id=<RID>&path=logs/node_0
 databricks api get "/api/2.0/mlflow/get-artifact?run_uuid=<RID>&path=logs/node_0/logs-0.chunk.txt" --profile <P>
 ```
 
-Alternative for fast iteration: the **`air` CLI** (`air run --file spec.yaml --watch`) submits
-the *identical* `ai_runtime_task` payload but runs as **you** and **streams logs live**. Use
-it to reproduce/diagnose (it was how every real error here was first seen). It is **not** a
-substitute for the DAB job — this project must deploy via DAB env-to-env.
+Alternative for fast iteration: the **`air` CLI** (see the `AIR_CLI/` section below) submits an
+equivalent `ai_runtime_task` payload but runs as **you** and **streams logs live** (`databricks
+air logs <RUN_ID>` — no MLflow hunt). Use it to reproduce/diagnose (it was how every real error
+here was first seen). It is **not** a substitute for the DAB job — this project must deploy via
+DAB env-to-env.
+
+## The `AIR_CLI/` sibling runner (and the src/ ↔ AIR_CLI drift)
+
+`AIR_CLI/` is a self-contained copy of the workload that runs through `databricks air run`
+instead of DABs — a *user* run that streams logs live, for fast iteration/debugging:
+
+```bash
+cd AIR_CLI
+databricks air run --file air_run.yaml --dry-run --profile <P>   # validate, no submit
+databricks air run --file air_run.yaml --watch   --profile <P>   # submit + stream logs
+databricks air run --file air_run.yaml --watch --override compute.num_accelerators=8 --profile <P>
+databricks air list|logs|get|cancel <RUN_ID> --profile <P>
+```
+
+`air_run.yaml` mirrors the DAB `ai_runtime_task` field-for-field (see the mapping table in
+`AIR_CLI/README.md`) and deliberately omits `mlflow_experiment_directory` /
+`mlflow_artifact_location` for the same reasons as the DAB job (invariants 1 and 10).
+
+**IMPORTANT — the `AIR_CLI/` copies have diverged from `src/`; they are NOT byte-identical**
+(despite what `AIR_CLI/README.md` still claims). As of now:
+
+- `command.sh` and `training_examples.json` — still identical to the DAB versions.
+- `AIR_CLI/train_llama_ray_fsdp.py` — **ahead of `src/`**: it adds a seeded train/val split
+  (`split_train_val`), a `validation_step`, a held-out val `DataLoader`, and per-step/per-epoch
+  train+val loss logging. The DAB `src/` driver has none of this (train-loss only).
+- `AIR_CLI/training_config.json` — adds the keys that driver reads (`validation_split`,
+  `val_per_device_batch_size`, `num_sanity_val_steps`) and carries a **real** `ray_storage_path`
+  Volume + a distinct `ray_train_run_name`; `src/training_config.json` keeps placeholder
+  `<catalog>/<schema>/...` paths.
+- `AIR_CLI/air_run.yaml` defaults to `GPU_1xA10` × 4 (H100 lines commented out).
+
+So **a change in one tree is NOT reflected in the other** — edit both deliberately, or port the
+validation logic into `src/` if the DAB job should gain it. Do not assume editing `src/` updates
+the `air` runner (or vice versa).
 
 ## Configuration has two channels
 
@@ -187,8 +224,10 @@ directly and they never appear in `variables.yaml`.
   `root_path`**: it is
   `<root_path>/files/command.sh` (e.g. `/Workspace/stage/files/command.sh` for `/Workspace/stage`).
   If you change a target's `root_path`, change its `command_path` too, or AI Runtime can't find
-  `command.sh`. `stage`/`test` ship with **placeholder SP ids** (`REPLACE_WITH_*`) — set the real
-  ones before deploying those targets.
+  `command.sh`. All three targets currently carry concrete SP application ids in `variables.yaml`
+  (the `test` id is still flagged with a `TODO` to confirm). Verify each target's
+  `service_principal_application_id` is the right SP for *your* workspace — and keep the top-level
+  `permissions:` SP reference in sync with it — before deploying that target.
 - Before first deploy to a new workspace, set: `workspace.host` (literal in `databricks.yml`),
   per-target `service_principal_application_id` / `workspace_root_path` / `command_path` (in
   `variables.yaml`), and the Volume paths in `src/training_config.json` (`ray_storage_path`).
