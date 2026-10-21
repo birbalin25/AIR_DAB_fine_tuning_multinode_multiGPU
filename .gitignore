@@ -8,3 +8,6 @@ dist/
 # Python
 __pycache__/
 *.pyc
+
+# Isaac Review local state
+.isaac/
